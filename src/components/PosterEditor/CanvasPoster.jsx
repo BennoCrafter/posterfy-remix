@@ -1,234 +1,295 @@
 /* eslint-disable react/prop-types */
-import { useRef, useEffect } from 'react';
+import { useEffect } from 'react';
+import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import { generateLogoWatermark } from '../svgs/LogoName.jsx';
 
 const CanvasPoster = ({ onImageReady, posterData, generatePoster, onTitleSizeAdjust, customFont }) => {
-    const canvasRef = useRef(null);
+  useEffect(() => {
+    const pxToPt = (px) => (px * 72) / 300; // 300dpi
+    const hexToRgb = (hex) => {
+      const bigint = parseInt(hex.replace('#', ''), 16);
+      return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 };
+    };
+    const hexToPdfRgb = (hex) => {
+      const c = hexToRgb(hex);
+      return rgb(c.r / 255, c.g / 255, c.b / 255);
+    };
 
-    useEffect(() => {
-        const generatePosterContent = async () => {
-            if (!generatePoster) return;
+    const rasterizeSvgToPngArrayBuffer = async (svgString, widthPx, heightPx, scale = 3) => {
+      const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+      const img = new window.Image();
+      img.crossOrigin = 'anonymous';
+      img.src = url;
+      await new Promise((res) => (img.onload = res));
+      const canvas = document.createElement('canvas');
+      canvas.width = widthPx * scale;
+      canvas.height = heightPx * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      return await new Promise((resolve) => canvas.toBlob((b) => b.arrayBuffer().then(resolve), 'image/png', 1));
+    };
 
-            const canvas = canvasRef.current;
-            const ctx = canvas.getContext('2d');
-            const width = 2480;
-            const height = 3508;
-            posterData.marginSide = parseInt(posterData.marginSide) || 0;
-            posterData.marginTop = parseInt(posterData.marginTop) || 0;
-            posterData.marginCover = parseInt(posterData.marginCover) || 0;
-            posterData.marginBackground = parseInt(posterData.marginBackground) || 0;
+    const fetchArrayBuffer = async (url) => {
+      const res = await fetch(url);
+      return await res.arrayBuffer();
+    };
 
-            const loadCover = async (url) => {
-                const image = new Image();
-                image.crossOrigin = "anonymous";
-                image.src = url;
-                return new Promise((resolve) => {
-                    image.onload = () => {
-                        ctx.drawImage(image, posterData.marginCover, posterData.marginCover, width - posterData.marginCover * 2, width - posterData.marginCover * 2);
-                        if (posterData.useFade) {
-                            let verticalFade = ctx.createLinearGradient(0, 0, 0, 3000 - posterData.marginBackground);
-                            const rgb = hexToRgb(posterData.backgroundColor);
-                            verticalFade.addColorStop(0.5, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0)`);
-                            verticalFade.addColorStop(0.8, posterData.backgroundColor);
-                            ctx.fillStyle = verticalFade;
-                            ctx.fillRect(0, 0, canvas.width, 2500 - posterData.marginBackground);
-                        }
-                        resolve();
-                    };
-                });
-            };
+    const generatePdf = async () => {
+      if (!generatePoster) return;
 
-            const drawWaterMark = async () => {
-                const svgString = generateLogoWatermark(posterData.textColor, 500, 134);
+      const widthPx = 2480;
+      const heightPx = 3508;
+      posterData.marginSide = parseInt(posterData.marginSide) || 0;
+      posterData.marginTop = parseInt(posterData.marginTop) || 0;
+      posterData.marginCover = parseInt(posterData.marginCover) || 0;
+      posterData.marginBackground = parseInt(posterData.marginBackground) || 0;
 
-                const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-                const url = URL.createObjectURL(svgBlob);
-                
-                const image = new Image();
-                image.src = url;
-                
-                return new Promise((resolve) => {
-                    image.onload = () => {
-                        ctx.globalAlpha = '0.5';
-                        ctx.drawImage(image, width - 70 - 500, 50, 500, 134);
-                        ctx.globalAlpha = '1';
-                        URL.revokeObjectURL(url);
-                        resolve();
-                    };
-                });
-            };
+      const pdfDoc = await PDFDocument.create();
 
-            const drawAlbumInfos = async () => {
-                let titleFontSize = posterData.titleSize ? parseInt(posterData.titleSize) : 230;
+      let embeddedFont = null;
+      try {
+        if (customFont && (typeof customFont === 'string') && (customFont.startsWith('http') || /\.(ttf|otf|woff2?|woff)$/i.test(customFont))) {
+          const fontBytes = await fetchArrayBuffer(customFont);
+          embeddedFont = await pdfDoc.embedFont(fontBytes);
+        } else {
+          embeddedFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+        }
+      } catch (e) {
+        embeddedFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+      }
 
-                const fontFamily = customFont || 'Montserrat';
-                if (!posterData.userAdjustedTitleSize && !posterData.initialTitleSizeSet) {
-                    ctx.font = `bold ${titleFontSize}px ${fontFamily}`;
-                    let titleWidth = ctx.measureText(posterData.albumName).width;
+      const page = pdfDoc.addPage([pxToPt(widthPx), pxToPt(heightPx)]);
+      const px = (v) => pxToPt(v);
 
-                    while (titleWidth > (2480 - posterData.marginSide * 2)) {
-                        titleFontSize -= 1;
-                        ctx.font = `bold ${titleFontSize}px ${fontFamily}`;
-                        titleWidth = ctx.measureText(posterData.albumName).width;
-                    }
+      // Fill background
+      page.drawRectangle({
+        x: 0,
+        y: 0,
+        width: px(widthPx),
+        height: px(heightPx),
+        color: hexToPdfRgb(posterData.backgroundColor),
+      });
 
-                    onTitleSizeAdjust(titleFontSize, true);
-                } else {
-                    ctx.font = `bold ${titleFontSize}px ${fontFamily}`;
-                }
+      // Draw cover image
+      const loadAndEmbedImage = async (url) => {
+        const ab = await fetchArrayBuffer(url);
+        try {
+          return await pdfDoc.embedPng(ab);
+        } catch (e) {
+          return await pdfDoc.embedJpg(ab);
+        }
+      };
 
-                ctx.fillStyle = posterData.textColor;
+      const coverUrl = posterData.useUncompressed ? posterData.uncompressedAlbumCover : posterData.albumCover;
+      if (coverUrl) {
+        const coverImage = await loadAndEmbedImage(coverUrl);
+        const coverW = widthPx - posterData.marginCover * 2;
+        const coverH = coverW;
+        const coverX = posterData.marginCover;
+        const coverY = posterData.marginCover;
+        // PDF origin is bottom-left, so Y = heightPx - coverY - coverH
+        page.drawImage(coverImage, {
+          x: px(coverX),
+          y: px(heightPx - coverY - coverH),
+          width: px(coverW),
+          height: px(coverH),
+        });
 
-                if (posterData.showTracklist) {
-                    ctx.fillText(posterData.albumName, posterData.marginSide, 2500 + posterData.marginTop);
-                } else {
-                    ctx.fillText(posterData.albumName, posterData.marginSide, 2790 + posterData.marginTop);
-                }
+        // Fade
+        if (posterData.useFade) {
+          const rgbObj = hexToRgb(posterData.backgroundColor);
+          const gradientSvg = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="${coverW}" height="${3000 - posterData.marginBackground}">
+              <defs>
+                <linearGradient id="g" x1="0" x2="0" y1="0" y2="1">
+                  <stop offset="0.5" stop-color="rgba(${rgbObj.r},${rgbObj.g},${rgbObj.b},0)"/>
+                  <stop offset="0.8" stop-color="${posterData.backgroundColor}"/>
+                </linearGradient>
+              </defs>
+              <rect width="100%" height="100%" fill="url(#g)"/>
+            </svg>
+          `;
+          const gradBuf = await rasterizeSvgToPngArrayBuffer(gradientSvg, coverW, 3000 - posterData.marginBackground, 2);
+          const gradImage = await pdfDoc.embedPng(gradBuf);
+          page.drawImage(gradImage, {
+            x: px(0),
+            y: px(heightPx - (3000 - posterData.marginBackground)),
+            width: px(widthPx),
+            height: px(2500 - posterData.marginBackground),
+            opacity: 1,
+          });
+        }
+      }
 
-                let artistsFontSize = posterData.artistsSize ? parseInt(posterData.artistsSize) : 110;
-                ctx.font = `bold ${artistsFontSize}px ${customFont || 'Montserrat'}`;
+      // Draw background rectangle (lower part)
+      page.drawRectangle({
+        x: 0,
+        y: 0,
+        width: px(widthPx),
+        height: px(heightPx - 2480 + posterData.marginBackground),
+        color: hexToPdfRgb(posterData.backgroundColor),
+      });
 
-                if (posterData.showTracklist) {
-                    ctx.fillText(posterData.artistsName, posterData.marginSide, (2500 + posterData.marginTop) + artistsFontSize * 1.3);
-                } else {
-                    ctx.fillText(posterData.artistsName, posterData.marginSide, (2820 + posterData.marginTop) + artistsFontSize);
-                }
+      // Album info (title auto-fit)
+      let titleFontSizePx = posterData.titleSize ? parseInt(posterData.titleSize) : 230;
+      const fontFamily = embeddedFont;
+      if (!posterData.userAdjustedTitleSize && !posterData.initialTitleSizeSet) {
+        let titleFontSizePt = pxToPt(titleFontSizePx);
+        let measuredWidthPt = fontFamily.widthOfTextAtSize(posterData.albumName || '', titleFontSizePt);
+        const maxWidthPt = pxToPt(2480 - posterData.marginSide * 2);
+        while (measuredWidthPt > maxWidthPt && titleFontSizePx > 10) {
+          titleFontSizePx -= 1;
+          titleFontSizePt = pxToPt(titleFontSizePx);
+          measuredWidthPt = fontFamily.widthOfTextAtSize(posterData.albumName || '', titleFontSizePt);
+        }
+        onTitleSizeAdjust && onTitleSizeAdjust(titleFontSizePx, true);
+      }
+      const titleFontSizePt = pxToPt(titleFontSizePx);
+      const textColor = hexToPdfRgb(posterData.textColor);
 
-                ctx.font = `bold 70px ${customFont || 'Montserrat'}`;
-                ctx.fillText(posterData.titleRelease, posterData.marginSide, 3310);
-                let releaseWidth = ctx.measureText(posterData.titleRelease).width;
-                ctx.fillText(posterData.titleRuntime, releaseWidth + posterData.marginSide + 100, 3310);
+      // Draw album name
+      const drawText = (text, xPx, yPx, sizePx, options = {}) => {
+        const sizePt = pxToPt(sizePx);
+        page.drawText(text || '', {
+          x: px(xPx),
+          y: px(heightPx - yPx - sizePx),
+          size: sizePt,
+          font: fontFamily,
+          color: options.color || textColor,
+          opacity: options.opacity,
+        });
+      };
 
-                ctx.globalAlpha = 0.7;
-                ctx.font = `bold 60px ${customFont || 'Montserrat'}`;
-                ctx.fillText(posterData.runtime, releaseWidth + posterData.marginSide + 100, 3390);
-                ctx.fillText(posterData.releaseDate, posterData.marginSide, 3390);
-                ctx.globalAlpha = 1;
+      if (posterData.showTracklist) {
+        drawText(posterData.albumName, posterData.marginSide, 2500 + posterData.marginTop, titleFontSizePx);
+      } else {
+        drawText(posterData.albumName, posterData.marginSide, 2790 + posterData.marginTop, titleFontSizePx);
+      }
 
-                ctx.fillStyle = posterData.color1;
-                ctx.fillRect(2045 - posterData.marginSide, 3368, 145, 30);
-                ctx.fillStyle = posterData.color2;
-                ctx.fillRect(2190 - posterData.marginSide, 3368, 145, 30);
-                ctx.fillStyle = posterData.color3;
-                ctx.fillRect(2335 - posterData.marginSide, 3368, 145, 30);
-            };
+      // Draw artists
+      let artistsFontSizePx = posterData.artistsSize ? parseInt(posterData.artistsSize) : 110;
+      if (posterData.showTracklist) {
+        drawText(posterData.artistsName, posterData.marginSide, (2500 + posterData.marginTop) + artistsFontSizePx * 1.3, artistsFontSizePx);
+      } else {
+        drawText(posterData.artistsName, posterData.marginSide, (2820 + posterData.marginTop) + artistsFontSizePx, artistsFontSizePx);
+      }
 
-            const drawTracklist = async () => {
-                ctx.fillStyle = posterData.textColor;
-                let paddingMusic = posterData.marginSide + 10;
-                let maxWidth = 0;
-                let paddingColumn = 0;
-                const fontSize = posterData.tracksSize ? parseInt(posterData.tracksSize) : 50;
-                ctx.font = `bold ${fontSize}px ${customFont || 'Montserrat'}`;
-                const musicSize = fontSize;
+      // Draw release info
+      const releaseSizePx = 70;
+      drawText(posterData.titleRelease, posterData.marginSide, 3310, releaseSizePx);
+      const titleReleaseWidthPt = fontFamily.widthOfTextAtSize(posterData.titleRelease || '', pxToPt(releaseSizePx));
+      const titleReleaseWidthPx = (titleReleaseWidthPt * 300) / 72;
+      drawText(posterData.titleRuntime, posterData.marginSide + titleReleaseWidthPx + 100, 3310, releaseSizePx);
 
-                const marginTop = parseInt(posterData.marginTop || 0);
-                const rectY = parseInt(posterData.artistsSize)
-                    ? (2500 + marginTop) + parseInt(posterData.artistsSize) * 1.3 + 130
-                    : (2500 + marginTop) + (110 * 1.2) + 130;
-                const rectHeight = 500;
-                const rectWidth = width - (posterData.marginSide * 2);
-                const rectX = parseInt(posterData.marginSide);
-                const maxTextHeight = rectY + rectHeight - 10 - parseInt(posterData.marginTop);
+      // Draw runtime and release date (smaller, faded)
+      const smallSizePx = 60;
+      drawText(posterData.runtime, posterData.marginSide + titleReleaseWidthPx + 100, 3390, smallSizePx, { opacity: 0.7 });
+      drawText(posterData.releaseDate, posterData.marginSide, 3390, smallSizePx, { opacity: 0.7 });
 
-                let textHeight = rectY;
+      // Draw colored bars
+      page.drawRectangle({ x: px(2045 - posterData.marginSide), y: px(heightPx - 3368 - 30), width: px(145), height: px(30), color: hexToPdfRgb(posterData.color1) });
+      page.drawRectangle({ x: px(2190 - posterData.marginSide), y: px(heightPx - 3368 - 30), width: px(145), height: px(30), color: hexToPdfRgb(posterData.color2) });
+      page.drawRectangle({ x: px(2335 - posterData.marginSide), y: px(heightPx - 3368 - 30), width: px(145), height: px(30), color: hexToPdfRgb(posterData.color3) });
 
-                posterData.tracklist.split('\n').forEach((track) => {
-                    if (textHeight + musicSize * 1.3 >= maxTextHeight) {
-                        textHeight = rectY;
-                        paddingMusic = maxWidth + (musicSize * 2.5) + paddingColumn;
-                        if (paddingMusic >= rectX + rectWidth) return;
-                        paddingColumn = paddingMusic - (musicSize * 2.5);
-                        maxWidth = 0;
-                    }
-                    const textWidth = ctx.measureText(`${track}`).width + posterData.marginSide;
-                    if (textWidth > maxWidth) {
-                        maxWidth = textWidth;
-                    }
-                    ctx.fillText(`${track}`, paddingMusic, textHeight);
-                    textHeight += (musicSize * 1.3);
-                });
-            };
+      // Draw tracklist
+      if (posterData.showTracklist) {
+        const fontSizePx = posterData.tracksSize ? parseInt(posterData.tracksSize) : 50;
+        let paddingMusic = posterData.marginSide + 10;
+        let maxWidth = 0;
+        let paddingColumn = 0;
 
-            const hexToRgb = (hex) => {
-                const bigint = parseInt(hex.replace("#", ""), 16);
-                return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 };
-            };
+        const marginTop = parseInt(posterData.marginTop || 0);
+        const rectY = parseInt(posterData.artistsSize)
+          ? (2500 + marginTop) + parseInt(posterData.artistsSize) * 1.3 + 130
+          : (2500 + marginTop) + (110 * 1.2) + 130;
+        const rectHeight = 500;
+        const rectWidthPx = widthPx - (posterData.marginSide * 2);
+        const rectX = parseInt(posterData.marginSide);
+        const maxTextHeight = rectY + rectHeight - 10 - parseInt(posterData.marginTop);
 
-            const getContrast = (rgb) => {
-                const luminance = (c) => {
-                    const val = c / 255;
-                    return val <= 0.03928 ? val / 12.92 : Math.pow((val + 0.055) / 1.055, 2.4);
-                };
-                const lum = 0.2126 * luminance(rgb.r) + 0.7152 * luminance(rgb.g) + 0.0722 * luminance(rgb.b);
-                return lum > 0.179 ? "black" : "white";
-            };
+        let textHeight = rectY;
 
-            const scannable = async () => {
-                const rgb = hexToRgb(posterData.backgroundColor);
-                const contrastColor = getContrast(rgb);
-                const targetColor = posterData.textColor;
-            
-                const svgUrl = `https://scannables.scdn.co/uri/plain/svg/${posterData.backgroundColor.replace('#', '')}/${contrastColor}/640/spotify:album:${posterData.albumID}`;
-                
-                const response = await fetch(svgUrl);
-                let svgText = await response.text();
-                
-                if(contrastColor == 'black'){
-                    svgText = svgText.replace(/fill="#000000"/g, `fill="${targetColor}"`);
-                } else{
-                    svgText = svgText.replace(/fill="#ffffff"/g, `fill="${targetColor}"`);
-                }
+        (posterData.tracklist || '').split('\n').forEach((track) => {
+          if (textHeight + fontSizePx * 1.3 >= maxTextHeight) {
+            textHeight = rectY;
+            paddingMusic = maxWidth + (fontSizePx * 2.5) + paddingColumn;
+            if (paddingMusic >= rectX + rectWidthPx) return;
+            paddingColumn = paddingMusic - (fontSizePx * 2.5);
+            maxWidth = 0;
+          }
+          const measuredWidthPt = fontFamily.widthOfTextAtSize(track, pxToPt(fontSizePx));
+          const measuredWidthPx = (measuredWidthPt * 300) / 72;
+          const textWidthPx = measuredWidthPx + posterData.marginSide;
+          if (textWidthPx > maxWidth) {
+            maxWidth = textWidthPx;
+          }
+          drawText(track, paddingMusic, textHeight, fontSizePx);
+          textHeight += (fontSizePx * 1.3);
+        });
+      }
 
-                svgText = svgText.replace(posterData.backgroundColor, 'transparent');
-                
-                const svgBlob = new Blob([svgText], { type: "image/svg+xml" });
-                const updatedSvgUrl = URL.createObjectURL(svgBlob);
-            
-                return new Promise((resolve) => {
-                    const image = new Image();
-                    image.src = updatedSvgUrl;
-            
-                    image.onload = function () {
-                        ctx.drawImage(image, 2020 - posterData.marginSide, 3235, 480, 120);
-                        const imageUrl = canvas.toDataURL('image/png');
-                        onImageReady(imageUrl);
-                        resolve();
-                    };
-                });
-            };
+      // Watermark
+      if (posterData.useWatermark) {
+        const svgString = generateLogoWatermark(posterData.textColor, 500, 134);
+        const wmBuf = await rasterizeSvgToPngArrayBuffer(svgString, 500, 134, 3);
+        const wmImage = await pdfDoc.embedPng(wmBuf);
+        page.drawImage(wmImage, {
+          x: px(widthPx - 70 - 500),
+          y: px(heightPx - 50 - 134),
+          width: px(500),
+          height: px(134),
+          opacity: 0.5,
+        });
+      }
 
-            const drawBackground = async () => {
-                ctx.fillStyle = posterData.backgroundColor;
-                ctx.fillRect(0, 2480 - posterData.marginBackground, width, height - 2480 + posterData.marginBackground);
-            };
-
-            ctx.clearRect(0, 0, width, height);
-            
-            ctx.fillStyle = posterData.backgroundColor;
-            ctx.fillRect(0, 0, width, height);
-
-            if (posterData.useUncompressed) {
-                await loadCover(await posterData.uncompressedAlbumCover);
-            } else {
-                await loadCover(posterData.albumCover);
-            }
-            
-            await drawBackground();
-            await drawAlbumInfos();
-            if (posterData.showTracklist) {
-                await drawTracklist();
-            }
-            if (posterData.useWatermark) { 
-                await drawWaterMark();
-            }
-            await scannable();
+      // Scannable
+      try {
+        const rgbForScannable = hexToRgb(posterData.backgroundColor);
+        const luminance = (c) => {
+          const val = c / 255;
+          return val <= 0.03928 ? val / 12.92 : Math.pow((val + 0.055) / 1.055, 2.4);
         };
+        const lum = 0.2126 * luminance(rgbForScannable.r) + 0.7152 * luminance(rgbForScannable.g) + 0.0722 * luminance(rgbForScannable.b);
+        const contrastColor = lum > 0.179 ? 'black' : 'white';
+        const targetColor = posterData.textColor.replace('#', '');
+        const svgUrl = `https://scannables.scdn.co/uri/plain/svg/${posterData.backgroundColor.replace('#', '')}/${contrastColor}/640/spotify:album:${posterData.albumID}`;
+        const scannableResp = await fetch(svgUrl);
+        let svgText = await scannableResp.text();
 
-        generatePosterContent();
-    }, [generatePoster, posterData, onImageReady]);
+        if (contrastColor === 'black') {
+          svgText = svgText.replace(/fill="#000000"/g, `fill="${posterData.textColor}"`);
+        } else {
+          svgText = svgText.replace(/fill="#ffffff"/g, `fill="${posterData.textColor}"`);
+        }
+        svgText = svgText.replace(posterData.backgroundColor, 'transparent');
 
-    return <canvas ref={canvasRef} width={2480} height={3508} style={{ display: 'none' }} />;
+        const scannableBuf = await rasterizeSvgToPngArrayBuffer(svgText, 640, 640, 3);
+        const scImg = await pdfDoc.embedPng(scannableBuf);
+        page.drawImage(scImg, {
+          x: px(2020 - posterData.marginSide),
+          y: px(heightPx - 3235 - 120),
+          width: px(480),
+          height: px(120),
+        });
+      } catch (e) {
+        // ignore scannable errors
+      }
+
+      // finalize pdf
+      const pdfBytes = await pdfDoc.save();
+      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const pdfUrl = URL.createObjectURL(blob);
+      onImageReady && onImageReady(pdfUrl);
+    };
+
+    generatePdf();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generatePoster, posterData, onImageReady]);
+
+  return null;
 };
 
 export default CanvasPoster;
